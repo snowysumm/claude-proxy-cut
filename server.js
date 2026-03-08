@@ -56,13 +56,37 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
     let systemPrompt = undefined;
 
     // 把 system message 抽出
-    let filteredMessages = messages.filter(m => {
-      if (m.role === "system") {
-        systemPrompt = m.content;
-        return false;
-      }
-      return true;
-    });
+   let filteredMessages = messages.filter(m => {
+  if (m.role === "system") {
+    systemPrompt = m.content;
+    return false;
+  }
+  return true;
+});
+
+// 1️⃣ 清理 UI metadata，例如 [ID:123456]
+filteredMessages = filteredMessages.map(m => {
+  if (typeof m.content === "string") {
+    m.content = m.content.replace(/\[ID:[^\]]+\]\s*/g, "");
+  }
+  return m;
+});
+
+// 2️⃣ 合併連續 assistant 訊息
+filteredMessages = filteredMessages.reduce((acc, msg) => {
+  const last = acc[acc.length - 1];
+
+  if (last && last.role === "assistant" && msg.role === "assistant") {
+    last.content += "\n" + msg.content;
+  } else {
+    acc.push(msg);
+  }
+
+  return acc;
+}, []);
+
+// 3️⃣ 截斷歷史（只保留最近20條）
+filteredMessages = filteredMessages.slice(-20);
 
     // --- 截斷歷史，只保留最近20條 ---
     filteredMessages = filteredMessages.slice(-20);
