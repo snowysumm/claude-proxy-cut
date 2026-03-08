@@ -73,7 +73,17 @@ const filteredMessages = messages.filter(m => {
   }
   return true;
 });
-    const safeMaxTokens = Math.min(max_tokens, 1500);
+    // --- 截斷歷史，只保留最近20條 ---
+filteredMessages = filteredMessages.slice(-20);
+
+// --- 清除 UI metadata（例如 [ID:123456]） ---
+filteredMessages = filteredMessages.map(m => {
+  if (typeof m.content === "string") {
+    m.content = m.content.replace(/\[ID:\d+\]\s*/g, "");
+  }
+  return m;
+});
+    const safeMaxTokens = Math.min(max_tokens, 600);
 
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
