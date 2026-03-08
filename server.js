@@ -7,12 +7,13 @@ const rateLimit = require("express-rate-limit");
 
 const app = express();
 app.use(cors());
-app.set('trust proxy', 1);
+app.set("trust proxy", 1);
 app.use(express.json());
+
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
-keyGenerator: () => "global"               
+  keyGenerator: () => "global"
 });
 
 app.use(limiter);
@@ -23,7 +24,6 @@ let lastReset = Date.now();
 function checkDailyLimit(req, res, next) {
   const now = Date.now();
 
-  // 超過 24 小時重置
   if (now - lastReset > 24 * 60 * 60 * 1000) {
     dailyCount = 0;
     lastReset = now;
@@ -36,19 +36,7 @@ function checkDailyLimit(req, res, next) {
   dailyCount++;
   next();
 }
-app.get("/v1/models", (req, res) => {
-  res.json({
-    object: "list",
-    data: [
-      {
-        id: "claude-sonnet-4-5",
-        object: "model",
-        created:1700000000,
-        owned_by: "openai"
-      }
-    ]
-  });
-});
+
 app.get("/v1/models", (req, res) => {
   res.json({
     object: "list",
@@ -61,28 +49,33 @@ app.get("/v1/models", (req, res) => {
     ]
   });
 });
+
 app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
   try {
     const { messages, max_tokens = 1000 } = req.body;
     let systemPrompt = undefined;
 
-const filteredMessages = messages.filter(m => {
-  if (m.role === "system") {
-    systemPrompt = m.content;
-    return false;
-  }
-  return true;
-});
-    // --- 截斷歷史，只保留最近20條 ---
-filteredMessages = filteredMessages.slice(-20);
+    // 把 system message 抽出
+    let filteredMessages = messages.filter(m => {
+      if (m.role === "system") {
+        systemPrompt = m.content;
+        return false;
+      }
+      return true;
+    });
 
-// --- 清除 UI metadata（例如 [ID:123456]） ---
-filteredMessages = filteredMessages.map(m => {
-  if (typeof m.content === "string") {
-    m.content = m.content.replace(/\[ID:\d+\]\s*/g, "");
-  }
-  return m;
-});
+    // --- 截斷歷史，只保留最近20條 ---
+    filteredMessages = filteredMessages.slice(-20);
+
+    // --- 清除 UI metadata（例如 [ID:123456]） ---
+    filteredMessages = filteredMessages.map(m => {
+      if (typeof m.content === "string") {
+        m.content = m.content.replace(/\[ID:\d+\]\s*/g, "");
+      }
+      return m;
+    });
+
+    // --- 限制輸出 token ---
     const safeMaxTokens = Math.min(max_tokens, 600);
 
     const response = await axios.post(
