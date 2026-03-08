@@ -1,14 +1,16 @@
-const cors = require("cors");
+ const cors = require("cors");
 const express = require("express");
-console.log("SERVER VERSION 2");
 const axios = require("axios");
 require("dotenv").config();
 const rateLimit = require("express-rate-limit");
 
 const app = express();
+
 app.use(cors());
 app.set("trust proxy", 1);
 app.use(express.json());
+
+console.log("Claude Proxy (optimized) starting...");
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
@@ -52,63 +54,62 @@ app.get("/v1/models", (req, res) => {
 
 app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
   try {
-    const { messages, max_tokens = 1000 } = req.body;
-    let systemPrompt = undefined;
+    const { messages = [], max_tokens = 1000 } = req.body;
 
-    // 把 system message 抽出
-   let filteredMessages = messages.filter(m => {
-  if (m.role === "system") {
-    systemPrompt = m.content;
-    return false;
-  }
-  return true;
-});
+    let systemPrompt;
+    let filteredMessages = [];
 
-// 1️⃣ 清理 UI metadata，例如 [ID:123456]
-filteredMessages = filteredMessages.map(m => {
-  if (typeof m.content === "string") {
-    m.content = m.content.replace(/\[ID:[^\]]+\]\s*/g, "");
-  }
-  return m;
-});
+    // 1️⃣ 抽出 system prompt
+    for (const m of messages) {
+      if (m.role === "system") {
+        systemPrompt = m.content;
+      } else {
+        filteredMessages.push(m);
+      }
+    }
 
-// 2️⃣ 合併連續 assistant 訊息
-filteredMessages = filteredMessages.reduce((acc, msg) => {
-  const last = acc[acc.length - 1];
-
-  if (last && last.role === "assistant" && msg.role === "assistant") {
-    last.content += "\n" + msg.content;
-  } else {
-    acc.push(msg);
-  }
-
-  return acc;
-}, []);
-
-// 3️⃣ 截斷歷史（只保留最近20條）
-filteredMessages = filteredMessages.slice(-20);
-
-    // --- 截斷歷史，只保留最近20條 ---
-    filteredMessages = filteredMessages.slice(-20);
-
-    // --- 清除 UI metadata（例如 [ID:123456]） ---
+    // 2️⃣ 清理 UI metadata（例如 [ID:123456]）
     filteredMessages = filteredMessages.map(m => {
       if (typeof m.content === "string") {
-        m.content = m.content.replace(/\[ID:\d+\]\s*/g, "");
+        m.content = m.content
+          .replace(/\[ID:[^\]]+\]\s*/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
       }
       return m;
     });
 
-    // --- 限制輸出 token ---
+    // 3️⃣ 移除空訊息
+    filteredMessages = filteredMessages.filter(
+      m => m.content && m.content.length > 0
+    );
+
+    // 4️⃣ 合併連續 assistant 訊息
+    filteredMessages = filteredMessages.reduce((acc, msg) => {
+      const last = acc[acc.length - 1];
+
+      if (last && last.role === "assistant" && msg.role === "assistant") {
+        last.content += "\n" + msg.content;
+      } else {
+        acc.push(msg);
+      }
+
+      return acc;
+    }, []);
+
+    // 5️⃣ 截斷歷史，只保留最近20條
+    filteredMessages = filteredMessages.slice(-20);
+
+    // 6️⃣ 限制輸出 token
     const safeMaxTokens = Math.min(max_tokens, 600);
 
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
         model: "claude-sonnet-4-5",
-        max_tokens: safeMaxTokens,
         system: systemPrompt,
-        messages: filteredMessages
+        messages: filteredMessages,
+        max_tokens: safeMaxTokens
       },
       {
         headers: {
@@ -135,6 +136,7 @@ filteredMessages = filteredMessages.slice(-20);
 
   } catch (err) {
     console.error("Claude error:", err.response?.data || err.message);
+
     res.status(500).json({
       error: err.response?.data || err.message
     });
