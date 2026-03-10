@@ -1,4 +1,4 @@
- const cors = require("cors");
+const cors = require("cors");
 const express = require("express");
 const axios = require("axios");
 require("dotenv").config();
@@ -10,7 +10,7 @@ app.use(cors());
 app.set("trust proxy", 1);
 app.use(express.json());
 
-console.log("Claude Proxy (optimized) starting...");
+console.log("Claude Proxy Debug Version Starting...");
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
@@ -59,7 +59,6 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
     let systemPrompt;
     let filteredMessages = [];
 
-    // 1️⃣ 抽出 system prompt
     for (const m of messages) {
       if (m.role === "system") {
         systemPrompt = m.content;
@@ -68,7 +67,6 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       }
     }
 
-    // 2️⃣ 清理 UI metadata（例如 [ID:123456]）
     filteredMessages = filteredMessages.map(m => {
       if (typeof m.content === "string") {
         m.content = m.content
@@ -79,12 +77,10 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       return m;
     });
 
-    // 3️⃣ 移除空訊息
     filteredMessages = filteredMessages.filter(
       m => m.content && m.content.length > 0
     );
 
-    // 4️⃣ 合併連續 assistant 訊息
     filteredMessages = filteredMessages.reduce((acc, msg) => {
       const last = acc[acc.length - 1];
 
@@ -97,20 +93,24 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       return acc;
     }, []);
 
-    // 5️⃣ 截斷歷史，只保留最近20條
     filteredMessages = filteredMessages.slice(-20);
 
-    // 6️⃣ 限制輸出 token
     const safeMaxTokens = Math.min(max_tokens, 600);
+
+    const finalPayload = {
+      model: "claude-sonnet-4-5",
+      system: systemPrompt,
+      messages: filteredMessages,
+      max_tokens: safeMaxTokens
+    };
+
+    console.log("===== CLAUDE PAYLOAD START =====");
+    console.log(JSON.stringify(finalPayload, null, 2));
+    console.log("===== CLAUDE PAYLOAD END =====");
 
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
-      {
-        model: "claude-sonnet-4-5",
-        system: systemPrompt,
-        messages: filteredMessages,
-        max_tokens: safeMaxTokens
-      },
+      finalPayload,
       {
         headers: {
           "x-api-key": process.env.CLAUDE_API_KEY,
@@ -136,7 +136,6 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
 
   } catch (err) {
     console.error("Claude error:", err.response?.data || err.message);
-
     res.status(500).json({
       error: err.response?.data || err.message
     });
