@@ -67,23 +67,38 @@ const INTERFACE_RULES = `可用消息類型（只能用以下格式）：
 // ═══════════════════════════════════════════════════
 // 限制常數
 // ═══════════════════════════════════════════════════
-const MAX_HISTORY   = 20;
-const MAX_MSGS_IN   = 100;
-const MAX_MSGS_OUT  = 7;
-const MAX_PERSONA   = 3000;
+const MAX_HISTORY  = 20;
+const MAX_MSGS_IN  = 100;
+const MAX_MSGS_OUT = 7;
+
+// EVEChat 格式規則從這裡開始，切掉後面所有內容
+// 保留：角色人設 + 當前情景 + 情景記憶 + 動態記憶
+// 丟棄：輸出格式規則（換成我們自己的）
+const CUT_MARKER = "# **首要规则：输出格式**";
 
 // ═══════════════════════════════════════════════════
-// 把各種 content 格式統一轉成字串
+// content 統一轉字串
 // ═══════════════════════════════════════════════════
 function normalizeContent(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return content
-      .filter(c => c.type === "text")
-      .map(c => c.text)
-      .join("");
+    return content.filter(c => c.type === "text").map(c => c.text).join("");
   }
   return String(content);
+}
+
+// ═══════════════════════════════════════════════════
+// 從 EVEChat 的 system prompt 抽出有用的部分
+// 切掉格式規則，保留角色人設 + 時間情境 + 記憶
+// ═══════════════════════════════════════════════════
+function extractPersona(rawSystem) {
+  if (!rawSystem) return "";
+  const cutIndex = rawSystem.indexOf(CUT_MARKER);
+  if (cutIndex !== -1) {
+    return rawSystem.slice(0, cutIndex).trim();
+  }
+  // 找不到切割點，直接回傳（可能是自訂角色沒有這段）
+  return rawSystem.trim();
 }
 
 // ═══════════════════════════════════════════════════
@@ -115,27 +130,21 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       return res.status(400).json({ error: `消息數量超限（最多 ${MAX_MSGS_IN} 條）` });
     }
 
-    // 2. 從 req.body.system 抓人設（EVEChat 的格式）
-    //    同時也兼容放在 messages 裡的 system message
-    let persona = "";
-    if (typeof req.body.system === "string") {
-      persona = req.body.system;
-    } else if (Array.isArray(req.body.system)) {
-      persona = req.body.system.map(b => b.text ?? "").join("");
+    // 2. 抓 system（EVEChat 可能放在 req.body.system 或 messages 裡）
+    let rawSystem = "";
+    if (typeof req.body.system === "string" && req.body.system) {
+      rawSystem = req.body.system;
     } else {
       const systemMsg = messages.find(m => m.role === "system");
-      if (systemMsg) persona = normalizeContent(systemMsg.content);
+      if (systemMsg) rawSystem = normalizeContent(systemMsg.content);
     }
 
-    // persona 截斷到 3000 字元，不報錯，靜默截斷
-    if (persona.length > MAX_PERSONA) {
-      persona = persona.slice(0, MAX_PERSONA);
-    }
+    // 3. 切掉格式規則，只保留人設 + 時間情境 + 記憶
+    const persona = extractPersona(rawSystem);
 
-    // debug log
-    console.log(`[請求] persona 長度：${persona.length}，消息數：${messages.length}`);
+    console.log(`[請求] 原始 system：${rawSystem.length} 字，切割後：${persona.length} 字，消息數：${messages.length}`);
 
-    // 3. 過濾 system、統一格式、截斷歷史
+    // 4. 過濾 system、統一格式、截斷歷史
     const chatMessages = messages
       .filter(m => m.role !== "system")
       .map(m => ({
@@ -144,18 +153,17 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       }))
       .slice(-MAX_HISTORY);
 
-    // 4. 送 Claude
-    const safeMaxTokens = Math.min(max_tokens, 1500);
-
+    // 5. 組裝 system blocks
     const systemBlocks = [
       { type: "text", text: BASE_RULES,      cache_control: { type: "ephemeral" } },
       { type: "text", text: INTERFACE_RULES, cache_control: { type: "ephemeral" } },
     ];
-    // persona 有內容才加，避免送空 block 給 Claude
     if (persona) {
       systemBlocks.push({ type: "text", text: persona });
     }
 
+    // 6. 送 Claude（不傳 temperature，Claude 不支援）
+    const safeMaxTokens = Math.min(max_tokens, 1500);
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
@@ -174,16 +182,16 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       }
     );
 
-    // 5. 合併所有 text block
+    // 7. 合併所有 text block
     let text = response.data.content
       .filter(c => c.type === "text")
       .map(c => c.text)
       .join("");
 
-    // 6. 清洗 markdown fence
+    // 8. 清洗 markdown fence
     text = text.trim().replace(/^```json\s*|^```\s*|```$/g, "").trim();
 
-    // 7. 截斷超過 7 條
+    // 9. 截斷超過 7 條
     try {
       const parsed = JSON.parse(text);
       if (Array.isArray(parsed) && parsed.length > MAX_MSGS_OUT) {
@@ -191,7 +199,7 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       }
     } catch (_) {}
 
-    // 8. 回傳 GPT 格式
+    // 10. 回傳 GPT 格式
     res.json({
       id: "chatcmpl-" + Date.now(),
       object: "chat.completion",
