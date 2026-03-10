@@ -6,19 +6,17 @@ const rateLimit = require("express-rate-limit");
 
 const app = express();
 app.use(cors());
-app.set("trust proxy", 1);
+app.set('trust proxy', 1);
 app.use(express.json());
 
-/* ─────────────────────────────
-   Rate limit
-───────────────────────────── */
-
+// ═══════════════════════════════════════════════════
+// Rate limit
+// ═══════════════════════════════════════════════════
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
   keyGenerator: () => "global"
 });
-
 app.use(limiter);
 
 let dailyCount = 0;
@@ -26,24 +24,20 @@ let lastReset = Date.now();
 
 function checkDailyLimit(req, res, next) {
   const now = Date.now();
-
   if (now - lastReset > 24 * 60 * 60 * 1000) {
     dailyCount = 0;
     lastReset = now;
   }
-
   if (dailyCount >= 700) {
     return res.status(429).json({ error: "Daily limit reached" });
   }
-
   dailyCount++;
   next();
 }
 
-/* ─────────────────────────────
-   固定 system prompt
-───────────────────────────── */
-
+// ═══════════════════════════════════════════════════
+// 固定層（所有角色共用，快取）
+// ═══════════════════════════════════════════════════
 const BASE_RULES = `所有回覆必須是 JSON 陣列，每個元素是一條消息。
 每次輸出 1–7 條消息。
 只能純語言聊天，不描寫動作、表情或心理。
@@ -70,39 +64,31 @@ const INTERFACE_RULES = `可用消息類型（只能用以下格式）：
 {"type":"create_anniversary","name":"","date":"YYYY-MM-DD","anniversary_type":"birthday/meeting/relationship/first_time/special_moment/other","description":""}
 {"type":"create_appointment","name":"","date":"YYYY-MM-DD","appointment_type":"date/meeting/promise/activity/other","description":""}`;
 
-/* ─────────────────────────────
-   限制
-───────────────────────────── */
+// ═══════════════════════════════════════════════════
+// 限制常數
+// ═══════════════════════════════════════════════════
+const MAX_HISTORY   = 20;
+const MAX_MSGS_IN   = 100;
+const MAX_MSGS_OUT  = 7;
+const MAX_PERSONA   = 3000;
 
-const MAX_HISTORY = 20;
-const MAX_MSG_LEN = 500;
-const MAX_PERSONA = 3000;
-const MAX_MSGS_OUT = 7;
-
-/* ─────────────────────────────
-   history 截斷（保留對話配對）
-───────────────────────────── */
-
-function trimHistory(messages, maxPairs = 10) {
-  const pairs = [];
-  let buffer = [];
-
-  for (const m of messages) {
-    buffer.push(m);
-
-    if (m.role === "assistant") {
-      pairs.push(buffer);
-      buffer = [];
-    }
+// ═══════════════════════════════════════════════════
+// 把各種 content 格式統一轉成字串
+// ═══════════════════════════════════════════════════
+function normalizeContent(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter(c => c.type === "text")
+      .map(c => c.text)
+      .join("");
   }
-
-  return pairs.slice(-maxPairs).flat();
+  return String(content);
 }
 
-/* ─────────────────────────────
-   模型列表
-───────────────────────────── */
-
+// ═══════════════════════════════════════════════════
+// 模型列表
+// ═══════════════════════════════════════════════════
 app.get("/v1/models", (req, res) => {
   res.json({
     object: "list",
@@ -117,145 +103,117 @@ app.get("/v1/models", (req, res) => {
   });
 });
 
-/* ─────────────────────────────
-   Chat API
-───────────────────────────── */
-
+// ═══════════════════════════════════════════════════
+// 主要對話路由
+// ═══════════════════════════════════════════════════
 app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
   try {
-
-    console.log("REQ:", JSON.stringify(req.body));
-
     const { messages, max_tokens = 600 } = req.body;
 
-    if (!Array.isArray(messages)) {
-      return res.status(400).json({ error: "messages 必須是陣列" });
+    // 1. 擋超量 history
+    if (messages.length > MAX_MSGS_IN) {
+      return res.status(400).json({ error: `消息數量超限（最多 ${MAX_MSGS_IN} 條）` });
     }
 
-    /* 取得 persona */
+    // 2. 從 req.body.system 抓人設（EVEChat 的格式）
+    //    同時也兼容放在 messages 裡的 system message
+    let persona = "";
+    if (typeof req.body.system === "string") {
+      persona = req.body.system;
+    } else if (Array.isArray(req.body.system)) {
+      persona = req.body.system.map(b => b.text ?? "").join("");
+    } else {
+      const systemMsg = messages.find(m => m.role === "system");
+      if (systemMsg) persona = normalizeContent(systemMsg.content);
+    }
 
-    const systemMsg = messages.find(m => m.role === "system");
-    const persona = systemMsg?.content ?? "";
-
+    // persona 截斷到 3000 字元，不報錯，靜默截斷
     if (persona.length > MAX_PERSONA) {
-      return res.status(400).json({ error: "persona too long" });
+      persona = persona.slice(0, MAX_PERSONA);
     }
 
-    /* 轉換 message 格式 */
+    // debug log
+    console.log(`[請求] persona 長度：${persona.length}，消息數：${messages.length}`);
 
-    const processedMessages = messages
+    // 3. 過濾 system、統一格式、截斷歷史
+    const chatMessages = messages
       .filter(m => m.role !== "system")
-      .map(m => {
+      .map(m => ({
+        role: m.role,
+        content: normalizeContent(m.content)
+      }))
+      .slice(-MAX_HISTORY);
 
-        let content = m.content;
+    // 4. 送 Claude
+    const safeMaxTokens = Math.min(max_tokens, 1500);
 
-        if (Array.isArray(content)) {
-          content = content
-            .filter(p => p.type === "text")
-            .map(p => p.text)
-            .join("");
-        }
-
-        if (typeof content !== "string") {
-          throw new Error("message content 格式錯誤");
-        }
-
-        if (content.length > MAX_MSG_LEN) {
-          throw new Error("message 過長");
-        }
-
-        return {
-          role: m.role,
-          content
-        };
-
-      });
-
-    const chatMessages = trimHistory(processedMessages, MAX_HISTORY / 2);
-
-    /* 呼叫 Claude */
+    const systemBlocks = [
+      { type: "text", text: BASE_RULES,      cache_control: { type: "ephemeral" } },
+      { type: "text", text: INTERFACE_RULES, cache_control: { type: "ephemeral" } },
+    ];
+    // persona 有內容才加，避免送空 block 給 Claude
+    if (persona) {
+      systemBlocks.push({ type: "text", text: persona });
+    }
 
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
         model: "claude-sonnet-4-5",
-        max_tokens: Math.min(max_tokens, 1500),
-
-        system: [
-          { type: "text", text: BASE_RULES, cache_control: { type: "ephemeral" } },
-          { type: "text", text: INTERFACE_RULES, cache_control: { type: "ephemeral" } },
-          { type: "text", text: persona }
-        ],
-
-        messages: chatMessages
+        max_tokens: safeMaxTokens,
+        system: systemBlocks,
+        messages: chatMessages,
       },
       {
         headers: {
           "x-api-key": process.env.CLAUDE_API_KEY,
           "anthropic-version": "2023-06-01",
           "anthropic-beta": "prompt-caching-2024-07-31",
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
         }
       }
     );
 
-    /* 合併 Claude text */
-
+    // 5. 合併所有 text block
     let text = response.data.content
       .filter(c => c.type === "text")
       .map(c => c.text)
       .join("");
 
-    /* 清理 markdown */
+    // 6. 清洗 markdown fence
+    text = text.trim().replace(/^```json\s*|^```\s*|```$/g, "").trim();
 
-    text = text
-      .replace(/```json/g, "")
-      .replace(/```/g, "")
-      .trim();
-
-    /* 限制輸出條數 */
-
+    // 7. 截斷超過 7 條
     try {
       const parsed = JSON.parse(text);
-
       if (Array.isArray(parsed) && parsed.length > MAX_MSGS_OUT) {
         text = JSON.stringify(parsed.slice(0, MAX_MSGS_OUT));
       }
+    } catch (_) {}
 
-    } catch {}
-
-    /* 回傳 OpenAI 格式 */
-
+    // 8. 回傳 GPT 格式
     res.json({
       id: "chatcmpl-" + Date.now(),
       object: "chat.completion",
       choices: [
         {
           index: 0,
-          message: {
-            role: "assistant",
-            content: text
-          },
+          message: { role: "assistant", content: text },
           finish_reason: "stop"
         }
       ]
     });
 
   } catch (err) {
-
-    console.error(err.message);
-
-    res.status(500).json({
-      error: err.response?.data || err.message
-    });
-
+    console.error("錯誤：", err.message);
+    if (err.response?.data) {
+      console.error("Claude 回傳：", JSON.stringify(err.response.data));
+    }
+    res.status(500).json({ error: err.response?.data || err.message });
   }
 });
 
-/* ───────────────────────────── */
-
+// ═══════════════════════════════════════════════════
 app.get("/", (req, res) => res.send("Claude proxy running"));
 
-app.listen(process.env.PORT || 3000, () =>
-  console.log("Server started")
-);
+app.listen(process.env.PORT || 3000, () => console.log("Server started"));
