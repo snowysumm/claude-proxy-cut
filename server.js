@@ -94,6 +94,7 @@ app.get("/v1/models", (req, res) => {
 // 主要對話路由
 // ═══════════════════════════════════════════════════
 app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
+  console.log("REQUEST BODY:", JSON.stringify(req.body,null,2));
   try {
     const { messages, max_tokens = 600 } = req.body;
 
