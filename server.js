@@ -67,29 +67,32 @@ const INTERFACE_RULES = `可用消息類型（只能用以下格式）：
 // ═══════════════════════════════════════════════════
 // 限制常數
 // ═══════════════════════════════════════════════════
-const MAX_HISTORY  = 20;
+const MAX_HISTORY  = 15;
 const MAX_MSGS_IN  = 100;
 const MAX_MSGS_OUT = 7;
 
 // EVEChat 格式規則從這裡開始，切掉後面所有內容
-// 保留：角色人設 + 當前情景 + 情景記憶 + 動態記憶
-// 丟棄：輸出格式規則（換成我們自己的）
 const CUT_MARKER = "# **首要规则：输出格式**";
 
 // ═══════════════════════════════════════════════════
-// content 統一轉字串
+// content 統一轉字串 + 清掉 EVEChat 的 [ID:xxxxxxxxxx]
 // ═══════════════════════════════════════════════════
 function normalizeContent(content) {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content.filter(c => c.type === "text").map(c => c.text).join("");
+  let text = "";
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    text = content.filter(c => c.type === "text").map(c => c.text).join("");
+  } else {
+    text = String(content);
   }
-  return String(content);
+  // 清掉 [ID:數字] 標記
+  return text.replace(/\[ID:\d+\]/g, "").trim();
 }
 
 // ═══════════════════════════════════════════════════
 // 從 EVEChat 的 system prompt 抽出有用的部分
-// 切掉格式規則，保留角色人設 + 時間情境 + 記憶
+// 切掉格式規則，保留角色人設 + 時間情境
 // ═══════════════════════════════════════════════════
 function extractPersona(rawSystem) {
   if (!rawSystem) return "";
@@ -97,7 +100,6 @@ function extractPersona(rawSystem) {
   if (cutIndex !== -1) {
     return rawSystem.slice(0, cutIndex).trim();
   }
-  // 找不到切割點，直接回傳（可能是自訂角色沒有這段）
   return rawSystem.trim();
 }
 
@@ -130,7 +132,7 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       return res.status(400).json({ error: `消息數量超限（最多 ${MAX_MSGS_IN} 條）` });
     }
 
-    // 2. 抓 system（EVEChat 可能放在 req.body.system 或 messages 裡）
+    // 2. 抓 system
     let rawSystem = "";
     if (typeof req.body.system === "string" && req.body.system) {
       rawSystem = req.body.system;
@@ -139,12 +141,12 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       if (systemMsg) rawSystem = normalizeContent(systemMsg.content);
     }
 
-    // 3. 切掉格式規則，只保留人設 + 時間情境 + 記憶
+    // 3. 切掉格式規則，只保留人設 + 時間情境
     const persona = extractPersona(rawSystem);
 
-    console.log(`[請求] 原始 system：${rawSystem.length} 字，切割後：${persona.length} 字，消息數：${messages.length}`);
+    console.log(`[請求] 原始：${rawSystem.length} 字 → 切割後：${persona.length} 字，消息數：${messages.length}`);
 
-    // 4. 過濾 system、統一格式、截斷歷史
+    // 4. 過濾 system、清 ID、截斷歷史
     const chatMessages = messages
       .filter(m => m.role !== "system")
       .map(m => ({
@@ -162,7 +164,7 @@ app.post("/v1/chat/completions", checkDailyLimit, async (req, res) => {
       systemBlocks.push({ type: "text", text: persona });
     }
 
-    // 6. 送 Claude（不傳 temperature，Claude 不支援）
+    // 6. 送 Claude
     const safeMaxTokens = Math.min(max_tokens, 1500);
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
